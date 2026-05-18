@@ -1,0 +1,598 @@
+# T7_full_trefas_simultan_singh
+
+#cell_1
+
+# Om något bibliotek saknas:
+# !pip install pandas numpy matplotlib tqdm openpyxl
+
+import os
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from tqdm.notebook import tqdm
+
+pd.set_option("display.max_columns", None)
+pd.options.mode.chained_assignment = None
+
+# ============================================================
+# FILVÄGAR OCH BLADNAMN
+# ============================================================
+
+send_file = r"C:\Users\lundi\OneDrive\Skóli\Svíþjóð\Exjobb\Arbetet\Källor\phasor_dlr-main\phasor_dlr-main\data\send-station-V1.xlsx"
+rec_file  = r"C:\Users\lundi\OneDrive\Skóli\Svíþjóð\Exjobb\Arbetet\Källor\phasor_dlr-main\phasor_dlr-main\data\rec-station-V1.xlsx"
+
+keyS_sheet  = "K-nyckel"
+dataS_sheet = "Station_K_3x15000"
+
+keyR_sheet  = "F-nyckel"
+dataR_sheet = "Station_F_3x15000"
+
+print("send finns:", os.path.exists(send_file))
+print("rec finns :", os.path.exists(rec_file))
+
+# ============================================================
+# HJÄLPFUNKTIONER
+# ============================================================
+
+def read_key_table_safe(filename, sheetname):
+    T = pd.read_excel(filename, sheet_name=sheetname, header=None)
+    T = T.iloc[:, :2].copy()
+    T.columns = ["Parameter", "ID"]
+    T = T.dropna()
+    return T
+
+def ls_diagnostics(A, Y, beta):
+    Y_hat = A @ beta
+    resid = Y - Y_hat
+
+    n = len(Y)
+    p = A.shape[1]
+    dof = max(n - p, 1)
+
+    sigma2 = np.sum(resid**2) / dof
+    ATA_inv = np.linalg.pinv(A.T @ A)
+    cov_beta = sigma2 * ATA_inv
+    se_beta = np.sqrt(np.diag(cov_beta))
+
+    return {
+        "residuals_vector": resid,
+        "sigma2": sigma2,
+        "cov_beta": cov_beta,
+        "se_beta": se_beta,
+        "dof": dof
+    }
+
+def estimate_B_and_K1_3ph(vs_dict, vr_dict, is_dict, ir_dict):
+    """
+    Full simultan trefas steg 1.
+
+    Parametrar:
+    beta1 = [
+        Re(K1_L1), Re(K1_L2), Re(K1_L3),
+        Im(K1_L1), Im(K1_L2), Im(K1_L3),
+        B_L1,      B_L2,      B_L3
+    ]
+    """
+    phases = ["L1", "L2", "L3"]
+
+    Y_parts = []
+    A_rows = []
+
+    for ph_idx, ph in enumerate(phases):
+        vs = vs_dict[ph]
+        vr = vr_dict[ph]
+        is_ = is_dict[ph]
+        ir = ir_dict[ph]
+
+        ir_re = np.real(ir)
+        ir_im = np.imag(ir)
+
+        v_sum = vs + vr
+        v_re = np.real(v_sum)
+        v_im = np.imag(v_sum)
+
+        # Realdel för denna fas
+        for k in range(len(vs)):
+            row = np.zeros(9)
+            row[ph_idx] = ir_re[k]          # Re(K1_ph)
+            row[3 + ph_idx] = -ir_im[k]     # Im(K1_ph)
+            row[6 + ph_idx] = 0.5 * v_re[k] # B_ph
+            A_rows.append(row)
+            Y_parts.append(np.real(is_[k]))
+
+        # Imaginärdel för denna fas
+        for k in range(len(vs)):
+            row = np.zeros(9)
+            row[ph_idx] = ir_im[k]          # Re(K1_ph)
+            row[3 + ph_idx] = ir_re[k]      # Im(K1_ph)
+            row[6 + ph_idx] = 0.5 * v_im[k] # B_ph
+            A_rows.append(row)
+            Y_parts.append(np.imag(is_[k]))
+
+    A = np.array(A_rows)
+    Y = np.array(Y_parts)
+
+    beta, residuals, rank, s = np.linalg.lstsq(A, Y, rcond=None)
+    diag = ls_diagnostics(A, Y, beta)
+
+    return {
+        "beta": beta,
+        "rank": rank,
+        "singular_values": s,
+        "A": A,
+        "Y": Y,
+        "cov_beta": diag["cov_beta"],
+        "se_beta": diag["se_beta"],
+        "sigma2": diag["sigma2"]
+    }
+
+def estimate_Z_and_K4_3ph(vs_dict, vr_dict, ir_dict, B_dict):
+    """
+    Full simultan trefas steg 2.
+
+    Parametrar:
+    beta2 = [
+        Re(K4_L1), Re(K4_L2), Re(K4_L3),
+        Im(K4_L1), Im(K4_L2), Im(K4_L3),
+        R_L1,      R_L2,      R_L3,
+        X_L1,      X_L2,      X_L3
+    ]
+    """
+    phases = ["L1", "L2", "L3"]
+
+    Y_parts = []
+    A_rows = []
+
+    Ieq_dict = {}
+
+    for ph in phases:
+        Ieq_dict[ph] = ir_dict[ph] + 1j * (B_dict[ph] / 2.0) * vr_dict[ph]
+
+    for ph_idx, ph in enumerate(phases):
+        vs = vs_dict[ph]
+        vr = vr_dict[ph]
+        Ieq = Ieq_dict[ph]
+
+        vr_re = np.real(vr)
+        vr_im = np.imag(vr)
+
+        ieq_re = np.real(Ieq)
+        ieq_im = np.imag(Ieq)
+
+        # Realdel
+        for k in range(len(vs)):
+            row = np.zeros(12)
+            row[ph_idx] = vr_re[k]            # Re(K4_ph)
+            row[3 + ph_idx] = -vr_im[k]       # Im(K4_ph)
+            row[6 + ph_idx] = ieq_re[k]       # R_ph
+            row[9 + ph_idx] = -ieq_im[k]      # X_ph
+            A_rows.append(row)
+            Y_parts.append(np.real(vs[k]))
+
+        # Imaginärdel
+        for k in range(len(vs)):
+            row = np.zeros(12)
+            row[ph_idx] = vr_im[k]            # Re(K4_ph)
+            row[3 + ph_idx] = vr_re[k]        # Im(K4_ph)
+            row[6 + ph_idx] = ieq_im[k]       # R_ph
+            row[9 + ph_idx] = ieq_re[k]       # X_ph
+            A_rows.append(row)
+            Y_parts.append(np.imag(vs[k]))
+
+    A = np.array(A_rows)
+    Y = np.array(Y_parts)
+
+    beta, residuals, rank, s = np.linalg.lstsq(A, Y, rcond=None)
+    diag = ls_diagnostics(A, Y, beta)
+
+    return {
+        "beta": beta,
+        "rank": rank,
+        "singular_values": s,
+        "A": A,
+        "Y": Y,
+        "Ieq_dict": Ieq_dict,
+        "cov_beta": diag["cov_beta"],
+        "se_beta": diag["se_beta"],
+        "sigma2": diag["sigma2"]
+    }
+
+
+#cell_2
+
+# ============================================================
+# LÄS NYCKLAR OCH RÅDATA
+# ============================================================
+
+keyS = read_key_table_safe(send_file, keyS_sheet)
+keyR = read_key_table_safe(rec_file, keyR_sheet)
+
+send = pd.read_excel(send_file, sheet_name=dataS_sheet, header=None)
+rec  = pd.read_excel(rec_file,  sheet_name=dataR_sheet, header=None)
+
+send = send.iloc[:, :3].copy()
+rec  = rec.iloc[:, :3].copy()
+
+send.columns = ["Timestamp", "ID", "Value"]
+rec.columns  = ["Timestamp", "ID", "Value"]
+
+send["Timestamp"] = pd.to_datetime(
+    send["Timestamp"],
+    format="%Y-%m-%d %H:%M:%S.%f",
+    errors="coerce"
+)
+
+rec["Timestamp"] = pd.to_datetime(
+    rec["Timestamp"],
+    format="%Y-%m-%d %H:%M:%S.%f",
+    errors="coerce"
+)
+
+send = send.dropna(subset=["Timestamp"])
+rec  = rec.dropna(subset=["Timestamp"])
+
+print("send tidsintervall:", send["Timestamp"].min(), "->", send["Timestamp"].max())
+print("rec  tidsintervall:", rec["Timestamp"].min(), "->", rec["Timestamp"].max())
+print("unika timestamps send:", send["Timestamp"].nunique())
+print("unika timestamps rec :", rec["Timestamp"].nunique())
+
+# ============================================================
+# MAPPA ID TILL PARAMETER, PIVOTERA OCH SYNKA
+# ============================================================
+
+send = send.merge(keyS, on="ID", how="inner")
+rec  = rec.merge(keyR, on="ID", how="inner")
+
+wideS = send.pivot_table(index="Timestamp", columns="Parameter", values="Value", aggfunc="first")
+wideR = rec.pivot_table(index="Timestamp", columns="Parameter", values="Value", aggfunc="first")
+
+wideS = wideS.add_suffix("_S")
+wideR = wideR.add_suffix("_R")
+
+df = wideS.join(wideR, how="inner").sort_index().copy()
+
+print("Antal rader wideS:", len(wideS))
+print("Antal rader wideR:", len(wideR))
+print("Gemensamma timestamps efter join:", len(df))
+
+# ============================================================
+# RENSNING
+# ============================================================
+
+required_cols = [
+    "UL1MAG_S","UL1ANG_S","UL1MAG_R","UL1ANG_R",
+    "IL1MAG_S","IL1ANG_S","IL1MAG_R","IL1ANG_R",
+    "UL2MAG_S","UL2ANG_S","UL2MAG_R","UL2ANG_R",
+    "IL2MAG_S","IL2ANG_S","IL2MAG_R","IL2ANG_R",
+    "UL3MAG_S","UL3ANG_S","UL3MAG_R","UL3ANG_R",
+    "IL3MAG_S","IL3ANG_S","IL3MAG_R","IL3ANG_R",
+]
+
+missing = [c for c in required_cols if c not in df.columns]
+if missing:
+    raise ValueError(f"Saknade kolumner: {missing}")
+
+for c in required_cols:
+    df[c] = (
+        df[c]
+        .astype(str)
+        .str.strip()
+        .str.replace(",", ".", regex=False)
+    )
+    df[c] = pd.to_numeric(df[c], errors="coerce")
+
+df_clean = df.dropna(subset=required_cols).copy()
+
+print("Rader efter rensning:", len(df_clean))
+print("Start:", df_clean.index.min())
+print("Slut :", df_clean.index.max())
+print("Tidslängd:", df_clean.index.max() - df_clean.index.min())
+
+# ============================================================
+# BYGG FASORER - MED INVERTERAD MOTTAGARSTRÖM
+# ============================================================
+
+phasors = {}
+
+for ph in ["L1", "L2", "L3"]:
+    Vs = df_clean[f"U{ph}MAG_S"] * np.exp(1j * np.deg2rad(df_clean[f"U{ph}ANG_S"]))
+    Vr = df_clean[f"U{ph}MAG_R"] * np.exp(1j * np.deg2rad(df_clean[f"U{ph}ANG_R"]))
+    Is = df_clean[f"I{ph}MAG_S"] * np.exp(1j * np.deg2rad(df_clean[f"I{ph}ANG_S"]))
+    Ir = -df_clean[f"I{ph}MAG_R"] * np.exp(1j * np.deg2rad(df_clean[f"I{ph}ANG_R"]))  # inverterad
+
+    phasors[ph] = {
+        "Vs": Vs,
+        "Vr": Vr,
+        "Is": Is,
+        "Ir": Ir,
+    }
+
+print("Fasorer skapade för:", list(phasors.keys()))
+print("Mottagarström Ir har inverterats.")
+
+
+#cell_3
+
+# ============================================================
+# FÖNSTERINSTÄLLNINGAR
+# ============================================================
+
+dt = df_clean.index.to_series().diff().dropna().dt.total_seconds()
+
+print(dt.describe())
+print("\nVanligaste tidssteg:")
+print(dt.value_counts().head(10))
+
+fs = 1.0 / dt.median()
+print(f"\nUppskattad samplingsfrekvens fs = {fs:.3f} Hz")
+
+window_seconds = 30
+step_seconds = 5
+
+WINDOW = int(round(window_seconds * fs))
+STEP   = int(round(step_seconds * fs))
+
+R_ref = 1.98
+alpha = 0.00403
+
+N = len(df_clean)
+
+print("N =", N)
+print("WINDOW =", WINDOW)
+print("STEP =", STEP)
+
+if N <= WINDOW:
+    raise ValueError(f"För få datapunkter. N={N}, WINDOW={WINDOW}")
+
+idx = np.arange(0, N - WINDOW + 1, STEP)
+print("Antal glidfönster =", len(idx))
+
+# ============================================================
+# KÖR FULL TREFAS SIMULTAN SINGH
+# ============================================================
+
+rows_3ph = []
+
+for i in tqdm(idx, desc="3-ph Singh simultaneous"):
+    i0 = i
+    i1 = i + WINDOW
+
+    vs_dict = {}
+    vr_dict = {}
+    is_dict = {}
+    ir_dict = {}
+
+    for ph in ["L1", "L2", "L3"]:
+        vs_dict[ph] = phasors[ph]["Vs"].iloc[i0:i1].to_numpy()
+        vr_dict[ph] = phasors[ph]["Vr"].iloc[i0:i1].to_numpy()
+        is_dict[ph] = phasors[ph]["Is"].iloc[i0:i1].to_numpy()
+        ir_dict[ph] = phasors[ph]["Ir"].iloc[i0:i1].to_numpy()
+
+    try:
+        # Steg 1
+        res1 = estimate_B_and_K1_3ph(vs_dict, vr_dict, is_dict, ir_dict)
+        beta1 = res1["beta"]
+
+        K1 = {
+            "L1": beta1[0] + 1j * beta1[3],
+            "L2": beta1[1] + 1j * beta1[4],
+            "L3": beta1[2] + 1j * beta1[5],
+        }
+
+        B = {
+            "L1": beta1[6],
+            "L2": beta1[7],
+            "L3": beta1[8],
+        }
+
+        # Steg 2
+        res2 = estimate_Z_and_K4_3ph(vs_dict, vr_dict, ir_dict, B)
+        beta2 = res2["beta"]
+
+        K4 = {
+            "L1": beta2[0] + 1j * beta2[3],
+            "L2": beta2[1] + 1j * beta2[4],
+            "L3": beta2[2] + 1j * beta2[5],
+        }
+
+        R = {
+            "L1": beta2[6],
+            "L2": beta2[7],
+            "L3": beta2[8],
+        }
+
+        X = {
+            "L1": beta2[9],
+            "L2": beta2[10],
+            "L3": beta2[11],
+        }
+
+    except np.linalg.LinAlgError:
+        continue
+
+    center_ts = df_clean.index[i0 + WINDOW // 2]
+
+    for ph_idx, ph in enumerate(["L1", "L2", "L3"]):
+        se_R = res2["se_beta"][6 + ph_idx]
+        se_X = res2["se_beta"][9 + ph_idx]
+
+        T_est = ((R[ph] / R_ref) - 1.0) / alpha + 20.0
+
+        dT_dR = 1.0 / (alpha * R_ref)
+        u_T = abs(dT_dR) * se_R
+
+        rows_3ph.append({
+            "Timestamp": center_ts,
+            "Phase": ph,
+            "K1_real": np.real(K1[ph]),
+            "K1_imag": np.imag(K1[ph]),
+            "K4_real": np.real(K4[ph]),
+            "K4_imag": np.imag(K4[ph]),
+            "B_S": B[ph],
+            "R_Ohm": R[ph],
+            "X_Ohm": X[ph],
+            "u_R_Ohm": se_R,
+            "u_X_Ohm": se_X,
+            "T_C": T_est,
+            "u_T_C": u_T,
+            "rank_step1": res1["rank"],
+            "rank_step2": res2["rank"]
+        })
+
+results_3ph_long = pd.DataFrame(rows_3ph)
+
+print("Antal rader i results_3ph_long:", len(results_3ph_long))
+display(results_3ph_long.head())
+
+
+
+#cell_4
+
+# ============================================================
+# BRETT FORMAT
+# ============================================================
+
+out_3ph = results_3ph_long.pivot(
+    index="Timestamp",
+    columns="Phase",
+    values=[
+        "K1_real", "K1_imag",
+        "K4_real", "K4_imag",
+        "B_S", "R_Ohm", "X_Ohm",
+        "u_R_Ohm", "u_X_Ohm",
+        "T_C", "u_T_C"
+    ]
+)
+
+out_3ph.columns = [f"{var}_{ph}" for var, ph in out_3ph.columns]
+out_3ph = out_3ph.reset_index().sort_values("Timestamp")
+
+print("HEAD out_3ph:")
+display(out_3ph.head())
+
+# Filtrera bort första fönstret för jämförbarhet
+out_3ph_filtered = out_3ph.iloc[1:].copy()
+
+print("HEAD out_3ph_filtered:")
+display(out_3ph_filtered.head())
+
+# ============================================================
+# SUMMARY
+# ============================================================
+
+summary_3ph_rows = []
+
+for ph in ["L1", "L2", "L3"]:
+    summary_3ph_rows.append({
+        "Phase": ph,
+        "R_mean_Ohm": out_3ph_filtered[f"R_Ohm_{ph}"].mean(),
+        "R_std_Ohm": out_3ph_filtered[f"R_Ohm_{ph}"].std(),
+        "R_min_Ohm": out_3ph_filtered[f"R_Ohm_{ph}"].min(),
+        "R_max_Ohm": out_3ph_filtered[f"R_Ohm_{ph}"].max(),
+        "X_mean_Ohm": out_3ph_filtered[f"X_Ohm_{ph}"].mean(),
+        "X_std_Ohm": out_3ph_filtered[f"X_Ohm_{ph}"].std(),
+        "T_mean_C": out_3ph_filtered[f"T_C_{ph}"].mean(),
+        "T_std_C": out_3ph_filtered[f"T_C_{ph}"].std(),
+        "K1_real_mean": out_3ph_filtered[f"K1_real_{ph}"].mean(),
+        "K1_imag_mean": out_3ph_filtered[f"K1_imag_{ph}"].mean(),
+        "K4_real_mean": out_3ph_filtered[f"K4_real_{ph}"].mean(),
+        "K4_imag_mean": out_3ph_filtered[f"K4_imag_{ph}"].mean(),
+    })
+
+summary_3ph_df = pd.DataFrame(summary_3ph_rows)
+
+print("SUMMARY 3-PH SIMULTAN:")
+display(summary_3ph_df)
+
+
+#cell_5
+
+# ============================================================
+# PLOTTAR
+# ============================================================
+
+plt.figure(figsize=(12, 5))
+for ph in ["L1", "L2", "L3"]:
+    plt.plot(out_3ph_filtered["Timestamp"], out_3ph_filtered[f"R_Ohm_{ph}"], label=ph)
+plt.title("Full trefas simultan Singh – resistans per fas")
+plt.xlabel("Tid")
+plt.ylabel("Resistans (Ohm)")
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(12, 5))
+for ph in ["L1", "L2", "L3"]:
+    plt.plot(out_3ph_filtered["Timestamp"], out_3ph_filtered[f"T_C_{ph}"], label=ph)
+plt.title("Full trefas simultan Singh – temperatur per fas")
+plt.xlabel("Tid")
+plt.ylabel("Temperatur (°C)")
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+fig, axes = plt.subplots(2, 2, figsize=(14, 8), sharex=True)
+
+for ph in ["L1", "L2", "L3"]:
+    axes[0, 0].plot(out_3ph_filtered["Timestamp"], out_3ph_filtered[f"K1_real_{ph}"], label=ph)
+    axes[0, 1].plot(out_3ph_filtered["Timestamp"], out_3ph_filtered[f"K1_imag_{ph}"], label=ph)
+    axes[1, 0].plot(out_3ph_filtered["Timestamp"], out_3ph_filtered[f"K4_real_{ph}"], label=ph)
+    axes[1, 1].plot(out_3ph_filtered["Timestamp"], out_3ph_filtered[f"K4_imag_{ph}"], label=ph)
+
+axes[0, 0].set_title("Re(K1) simultan 3-fas")
+axes[0, 1].set_title("Im(K1) simultan 3-fas")
+axes[1, 0].set_title("Re(K4) simultan 3-fas")
+axes[1, 1].set_title("Im(K4) simultan 3-fas")
+
+for ax in axes.ravel():
+    ax.grid(True)
+    ax.legend()
+
+plt.tight_layout()
+plt.show()
+
+# ============================================================
+# JÄMFÖRELSE MOT TEST-REFERENS
+# ============================================================
+
+R_ref_test = 1.98
+
+comparison_3ph_rows = []
+
+for ph in ["L1", "L2", "L3"]:
+    R_mean = out_3ph_filtered[f"R_Ohm_{ph}"].mean()
+    abs_err = R_mean - R_ref_test
+    rel_err_pct = 100 * abs_err / R_ref_test
+
+    comparison_3ph_rows.append({
+        "Phase": ph,
+        "R_mean_Ohm": R_mean,
+        "R_ref_test_Ohm": R_ref_test,
+        "Absolute_error_Ohm": abs_err,
+        "Relative_error_percent": rel_err_pct
+    })
+
+comparison_3ph_df = pd.DataFrame(comparison_3ph_rows)
+
+print("JÄMFÖRELSE MOT R_ref_test:")
+display(comparison_3ph_df)
+
+# ============================================================
+# SPARA TILL EXCEL
+# ============================================================
+
+output_file = r"C:\Users\lundi\OneDrive\Skóli\Svíþjóð\Exjobb\Arbetet\Källor\phasor_dlr-main\phasor_dlr-main\data\singh_3ph_simultaneous.xlsx"
+
+with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
+    out_3ph.to_excel(writer, sheet_name="Results_3ph", index=False)
+    out_3ph_filtered.to_excel(writer, sheet_name="Results_3ph_filtered", index=False)
+    summary_3ph_df.to_excel(writer, sheet_name="Summary_3ph", index=False)
+    comparison_3ph_df.to_excel(writer, sheet_name="Compare_Rref", index=False)
+    results_3ph_long.to_excel(writer, sheet_name="LongFormat", index=False)
+
+print("Sparat till:", output_file)
+
+print("\nTAIL out_3ph_filtered:")
+display(out_3ph_filtered.tail())
