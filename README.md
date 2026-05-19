@@ -4,6 +4,7 @@ Sævar Ingi Sveinsson, Mittuniversitetet, 2026
 
 Detta repo innehåller all kod, datahantering och figurgenerering som används i mitt examensarbete 
 "Resistansbaserad temperaturuppskattning i kraftledningar med tvåänds fasormätningar: en analys av mätkrav och känslighet".
+Det bör nämnas att spänningsfallsbaserade impedansmetoden hade arbets namnet Z-drop i kodningen.
 
 ## 📌 Innehål
 Projektet undersöker:
